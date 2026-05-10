@@ -37,11 +37,12 @@ function toNum(s: string): number {
 
 function isHidden(details: string): boolean {
   const d = details.toLowerCase();
+  // Fuliza-related transactions should remain visible.
+  if (d.includes("fuliza")) return false;
   return (
     d.includes("od loan repayment") ||
     d.includes("overdraft") ||
-    d.includes("m-pesa overdraw") ||
-    d.includes("fuliza")
+    d.includes("m-pesa overdraw")
   );
 }
 
