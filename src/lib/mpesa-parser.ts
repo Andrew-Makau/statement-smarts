@@ -173,8 +173,9 @@ function buildTxn(lineItems: PositionedItem[][]): MpesaTransaction | null {
 export async function parseMpesaPdf(file: File): Promise<ParseResult> {
   // Configure pdf.js worker (Vite friendly).
   const pdfjs: typeof import("pdfjs-dist") = await import("pdfjs-dist");
-  // @ts-expect-error worker import
-  const workerSrc = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
+  const workerSrc = (
+    (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")) as { default: string }
+  ).default;
   pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
   const buf = await file.arrayBuffer();
