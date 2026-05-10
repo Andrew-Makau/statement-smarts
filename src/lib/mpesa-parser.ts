@@ -80,56 +80,62 @@ function groupIntoLines(items: PositionedItem[]): PositionedItem[][] {
 }
 
 // Assemble a transaction record from a group of lines belonging to it.
+// IMPORTANT: structured fields (receipt, datetime, status, paidIn, withdrawn,
+// balance) are read ONLY from the first/header line of the transaction. Any
+// subsequent lines belong entirely to the wrapped Details column and must
+// never contribute numbers to the money columns (otherwise account numbers
+// like "04226751503" get mistaken for the balance).
 function buildTxn(lineItems: PositionedItem[][]): MpesaTransaction | null {
-  // Flatten into ordered tokens (line by line)
-  const flat: PositionedItem[] = [];
-  for (const ln of lineItems) flat.push(...ln);
-  if (flat.length === 0) return null;
+  if (lineItems.length === 0) return null;
+  const headTokens = lineItems[0].map((t) => t.str.trim()).filter(Boolean);
+  if (headTokens.length === 0) return null;
 
-  const tokens = flat.map((t) => t.str.trim()).filter(Boolean);
-
-  // First token must be receipt
-  const receiptNo = tokens[0];
+  const receiptNo = headTokens[0];
   if (!RECEIPT_RE.test(receiptNo)) return null;
 
-  // Find datetime: scan for "YYYY-MM-DD" then combine with next "HH:MM:SS"
+  // Find datetime in the header line
   let completionTime = "";
   let dtIdx = -1;
-  for (let i = 1; i < tokens.length - 1; i++) {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(tokens[i]) && /^\d{2}:\d{2}:\d{2}$/.test(tokens[i + 1])) {
-      completionTime = `${tokens[i]} ${tokens[i + 1]}`;
+  let dtSpan = 1;
+  for (let i = 1; i < headTokens.length; i++) {
+    if (
+      i + 1 < headTokens.length &&
+      /^\d{4}-\d{2}-\d{2}$/.test(headTokens[i]) &&
+      /^\d{2}:\d{2}:\d{2}$/.test(headTokens[i + 1])
+    ) {
+      completionTime = `${headTokens[i]} ${headTokens[i + 1]}`;
       dtIdx = i;
+      dtSpan = 2;
       break;
     }
-    if (DATETIME_RE.test(tokens[i])) {
-      completionTime = tokens[i];
+    if (DATETIME_RE.test(headTokens[i])) {
+      completionTime = headTokens[i];
       dtIdx = i;
+      dtSpan = 1;
       break;
     }
   }
   if (!completionTime) return null;
 
-  // Find "Completed"/"Failed"/"Pending" status token from the right
+  // Status token from the right of the header line
   let statusIdx = -1;
-  for (let i = tokens.length - 1; i >= 0; i--) {
-    if (/^(Completed|Failed|Pending|Cancelled)$/i.test(tokens[i])) {
+  for (let i = headTokens.length - 1; i >= 0; i--) {
+    if (/^(Completed|Failed|Pending|Cancelled)$/i.test(headTokens[i])) {
       statusIdx = i;
       break;
     }
   }
-  const status = statusIdx >= 0 ? tokens[statusIdx] : "Completed";
+  const status = statusIdx >= 0 ? headTokens[statusIdx] : "Completed";
 
-  // Collect numeric tokens after status (PaidIn, Withdrawn, Balance)
+  // Numeric tokens after the status (header line only)
   const nums: string[] = [];
-  const startNumScan = statusIdx >= 0 ? statusIdx + 1 : -1;
-  if (startNumScan > 0) {
-    for (let i = startNumScan; i < tokens.length; i++) {
-      if (NUMBER_RE.test(tokens[i])) nums.push(tokens[i]);
+  if (statusIdx >= 0) {
+    for (let i = statusIdx + 1; i < headTokens.length; i++) {
+      if (NUMBER_RE.test(headTokens[i])) nums.push(headTokens[i]);
     }
   } else {
-    // fallback: take trailing numerics
-    for (let i = tokens.length - 1; i >= 0; i--) {
-      if (NUMBER_RE.test(tokens[i])) nums.unshift(tokens[i]);
+    for (let i = headTokens.length - 1; i >= 0; i--) {
+      if (NUMBER_RE.test(headTokens[i])) nums.unshift(headTokens[i]);
       else break;
     }
   }
@@ -142,7 +148,6 @@ function buildTxn(lineItems: PositionedItem[][]): MpesaTransaction | null {
     withdrawn = Math.abs(toNum(nums[1]));
     balance = toNum(nums[nums.length - 1]);
   } else if (nums.length === 2) {
-    // One of paidIn/withdrawn is blank
     const a = toNum(nums[0]);
     balance = toNum(nums[1]);
     if (a < 0) withdrawn = Math.abs(a);
@@ -151,10 +156,19 @@ function buildTxn(lineItems: PositionedItem[][]): MpesaTransaction | null {
     balance = toNum(nums[0]);
   }
 
-  // Details: tokens between dt end and statusIdx
-  const detailsStart = dtIdx + (DATETIME_RE.test(tokens[dtIdx]) ? 1 : 2);
-  const detailsEnd = statusIdx >= 0 ? statusIdx : tokens.length;
-  const details = tokens.slice(detailsStart, detailsEnd).join(" ").replace(/\s+/g, " ").trim();
+  // Details from header line: tokens between datetime and status
+  const detailsStart = dtIdx + dtSpan;
+  const detailsEnd = statusIdx >= 0 ? statusIdx : headTokens.length;
+  const headDetails = headTokens.slice(detailsStart, detailsEnd).join(" ");
+
+  // Append every wrapped continuation line verbatim — these belong entirely
+  // to the Details column, including numbers like account/phone numbers.
+  const wrapped: string[] = [];
+  for (let i = 1; i < lineItems.length; i++) {
+    const text = lineItems[i].map((t) => t.str).join(" ").trim();
+    if (text) wrapped.push(text);
+  }
+  const details = [headDetails, ...wrapped].join(" ").replace(/\s+/g, " ").trim();
 
   const direction = classify(details, paidIn, withdrawn);
   const txn: MpesaTransaction = {
